@@ -37,10 +37,6 @@ from sklearn.impute import SimpleImputer
 import progressbar
 import networkx as nx
 import psutil
-from threading import Thread
-from threading import Semaphore
-
-sem = Semaphore(5)
 
 class Tree(object):
 	def __init__(self):
@@ -155,15 +151,15 @@ class HierarchicalClassifier(object):
 
 	def kfold_validation(self, k=10):
 
-		sem.acquire()
-
 		available_ram = psutil.virtual_memory()[1]
 		available_ram = int(int(available_ram) * .9 * 1e-9)
 
 		if available_ram > 5:
 			jvm.start(max_heap_size='5g')
 		else:
-			jvm.start(max_heap_size=str(available_ram)+'g')
+			print('Seem your machine has less than 5 GB amount of RAM available:\n')
+			print('cannot start jvm.')
+			sys.exit()
 
 		###
 
@@ -184,13 +180,10 @@ class HierarchicalClassifier(object):
 			data[:, nominal_features_index] = encoder.fit_transform(
 				data[:, nominal_features_index])
 
-		# Impute missing value by fitting over training set and transforming both sets
-		imp = SimpleImputer(missing_values='NaN', strategy='most_frequent')
-		data[:, :self.dataset_features_number] = imp.fit_transform(data[:, :self.dataset_features_number])
-
 		classifiers_per_fold = []
 		oracles_per_fold = []
 		predictions_per_fold = []
+		probabilities_per_fold = []
 		predictions_per_fold_all = []
 
 		print('\n***\nStart testing with '+str(k)+'Fold cross-validation -f'+str(self.features_number)+' -c'+self.classifier_name+'\n***\n')
@@ -211,6 +204,7 @@ class HierarchicalClassifier(object):
 			self.ground_through = data[train_index, self.dataset_features_number:]
 			self.oracle = data[test_index, self.dataset_features_number:]
 			self.prediction = np.ndarray(shape=[len(test_index),self.levels_number],dtype='<U24')
+			self.probability = np.ndarray(shape=[len(test_index),self.levels_number],dtype=object)
 			self.prediction_all = np.ndarray(shape=[len(test_index),self.levels_number],dtype='<U24')
 
 			root = Tree()
@@ -221,18 +215,20 @@ class HierarchicalClassifier(object):
 			root.children_tags = list(set(self.ground_through[root.train_index, root.level]))
 			root.children_number = len(root.children_tags)
 
-			if self.has_config:
-				if 'f' in config[root.tag + '_' + str(root.level + 1)]:
-					root.features_number = config[root.tag + '_' + str(root.level + 1)]['f']
-				elif 'p' in config[root.tag + '_' + str(root.level + 1)]:
-					root.packets_number = config[root.tag + '_' + str(root.level + 1)]['p']
-				root.classifier_name = config[root.tag + '_' + str(root.level + 1)]['c']
+			if self.has_config and root.tag + '_' + str(root.level + 1) in self.config:
+				if 'f' in self.config[root.tag + '_' + str(root.level + 1)]:
+					root.features_number = self.config[root.tag + '_' + str(root.level + 1)]['f']
+				elif 'p' in self.config[root.tag + '_' + str(root.level + 1)]:
+					root.packets_number = self.config[root.tag + '_' + str(root.level + 1)]['p']
+				root.classifier_name = self.config[root.tag + '_' + str(root.level + 1)]['c']
 
 				print('config','tag',root.tag,'level',root.level,'f',root.features_number,'c',root.classifier_name)
 			else:
 				root.features_number = self.features_number
 				root.packets_number = self.packets_number
 				root.classifier_name = self.classifier_name
+
+				print('config','tag',root.tag,'level',root.level,'f',root.features_number,'c',root.classifier_name)
 
 			self.classifiers.append(root)
 
@@ -253,6 +249,7 @@ class HierarchicalClassifier(object):
 
 			oracles_per_fold.append(self.oracle)
 			predictions_per_fold.append(self.prediction)
+			probabilities_per_fold.append(self.probability)
 			predictions_per_fold_all.append(self.prediction_all)
 
 			bar_cnt += 1
@@ -284,6 +281,12 @@ class HierarchicalClassifier(object):
 				type_discr = 'early'
 			feat_discr = '_c_' + self.config_name
 
+		if self.has_config and self.classifier_name:
+			if self.features_number != 0:
+				feat_discr = '_f_' + str(self.features_number) + feat_discr + '_' + self.classifier_name
+			if self.packets_number != 0:
+				feat_discr = '_p_' + str(self.packets_number) + feat_discr + '_' + self.classifier_name
+
 		material_features_folder = './data_'+folder_discriminator+'/material/features/'
 
 		if not os.path.exists(material_folder):
@@ -313,10 +316,8 @@ class HierarchicalClassifier(object):
 
 			file = open(material_folder + 'multi_' + type_discr + '_level_' + str(classifier.level+1) + feat_discr + '_tag_' + str(classifier.tag) + '.dat', 'w+')
 			file.close()
-
 			file = open(material_folder + 'multi_' + type_discr + '_level_' + str(classifier.level+1) + feat_discr + '_tag_' + str(classifier.tag) + '_all.dat', 'w+')
 			file.close()
-
 			file = open(material_features_folder + 'multi_' + type_discr + '_level_' + str(classifier.level+1) + feat_discr + '_tag_' + str(classifier.tag) + '_features.dat', 'w+')
 			file.close()
 
@@ -347,25 +348,15 @@ class HierarchicalClassifier(object):
 
 				file = open(material_folder + 'multi_' + type_discr + '_level_' + str(classifier.level+1) + feat_discr + '_tag_' + str(classifier.tag) + '_all.dat', 'a')
 
-				if classifier.level > 0:
-					index = []
-
-					for pred_n, prediction in enumerate(predictions_per_fold_all[fold_n][classifier.test_index, classifier.level-1]):
-						if prediction == oracles_per_fold[fold_n][classifier.test_index[pred_n], classifier.level-1]:
-							index.append(classifier.test_index[pred_n])
-
-					prediction_all = predictions_per_fold_all[fold_n][index, classifier.level]
-					oracle_all = oracles_per_fold[fold_n][index, classifier.level]
-				else:
-					prediction_all = predictions_per_fold_all[fold_n][classifier.test_index_all, classifier.level]
-					oracle_all = oracles_per_fold_all[fold_n][classifier.test_index_all, classifier.level]
+				prediction_all = predictions_per_fold_all[fold_n][classifier.test_index_all, classifier.level]
+				oracle_all = oracles_per_fold[fold_n][classifier.test_index_all, classifier.level]
 
 				file.write('@fold\n')
 				for o, p in zip(oracle_all, prediction_all):
 						file.write(str(o)+' '+str(p)+'\n')
 
 				file.close()
-
+				
 				file = open(material_features_folder + 'multi_' + type_discr + '_level_' + str(classifier.level+1) + feat_discr + '_tag_' + str(classifier.tag) + '_features.dat', 'a')
 
 				file.write('@fold\n')
@@ -397,18 +388,64 @@ class HierarchicalClassifier(object):
 					G.add_edge(node_parent, node_child)
 		nx.write_gpickle(G, graph_folder+'multi_' + type_discr + feat_discr +'_graph.gml')
 
+		print('\n***\nStart testing with incremental gamma threshold\n***\n')
+
+		bar = progressbar.ProgressBar(maxval=9, widgets=[progressbar.Bar(
+			'=', '[', ']'), ' ', progressbar.Percentage()])
+		bar.start()
+
+		thresholds_number = 9
+
+		oracle_gamma = np.ndarray(shape=[levels_number, thresholds_number, k], dtype=object)
+		prediction_gamma = np.ndarray(shape=[levels_number, thresholds_number, k], dtype=object)
+		classified_ratio = np.ndarray(shape=[levels_number, thresholds_number, k], dtype=float)
+
+		for i in range(thresholds_number):
+			gamma = float(i+1)/10.0
+
+			for j in range(k):
+
+				indexes = []
+
+				for l in range(levels_number):
+
+					for index, p in enumerate(probabilities_per_fold[j][:, l]):
+						if max(p) < gamma:
+							indexes.append(index)
+
+					new_oracle = np.delete(oracles_per_fold[j][:, l], [indexes])
+					new_prediction = np.delete(predictions_per_fold[j][:, l], [indexes])
+
+					oracle_gamma[l, i, j] = new_oracle
+					prediction_gamma[l, i, j] = new_prediction
+					classified_ratio[l, i, j] = float(len(new_prediction))/float(len(predictions_per_fold[j][:, l]))
+
+			bar.update(i)
+
+		bar.finish()
+
+		for i in range(thresholds_number):
+
+			for l in range(levels_number):
+
+				file = open(material_folder + 'multi_' + type_discr + '_level_' + str(l) + feat_discr + '_gamma_'+str(float(i+1)/10.0)+'.dat', 'w+')
+
+				for j in range(k):
+					file.write('@fold_cr\n')
+					file.write(str(classified_ratio[l, i, j])+'\n')
+					for o, p in zip(oracle_gamma[l, i, j], prediction_gamma[l, i, j]):
+						file.write(str(o)+' '+str(p)+'\n')
+
+				file.close()
+
 		###
 
 		jvm.stop()
-
-		sem.release()
 
 	def features_selection(self,node):
 		features_index = []
 
 		if node.features_number != 0 and node.features_number != self.dataset_features_number:
-
-			# print('\n***\nFeature Selection for Classifier ' + node.tag + ' Level ' + str(node.level) + '\n***\n')
 
 			selector = SelectKBest(mutual_info_classif, k=node.features_number)
 			training_set_selected = selector.fit_transform(
@@ -444,27 +481,23 @@ class HierarchicalClassifier(object):
 			child.train_index = [index for index in parent.train_index if self.ground_through[index, parent.level] == child.tag]
 			child.test_index = [index for index in parent.test_index if self.prediction[index, parent.level] == child.tag]
 
-			child.test_index_all = [index for index in parent.test_index_all if self.ground_through[index, parent.level] == child.tag]
+			child.test_index_all = [index for index in parent.test_index_all if self.oracle[index, parent.level] == child.tag]
 			child.children_tags = list(set(self.ground_through[child.train_index, child.level]))
 
 			child.children_number = len(child.children_tags)
 
-			if self.has_config:
-				if 'f' in config[child.tag + '_' + str(child.level + 1)]:
-					child.features_number = config[child.tag + '_' + str(child.level + 1)]['f']
-				elif 'p' in config[child.tag + '_' + str(child.level + 1)]:
-					child.packets_number = config[child.tag + '_' + str(child.level + 1)]['p']
-				child.classifier_name = config[child.tag + '_' + str(child.level + 1)]['c']
+			if self.has_config and child.tag + '_' + str(child.level + 1) in self.config:
+				if 'f' in self.config[child.tag + '_' + str(child.level + 1)]:
+					child.features_number = self.config[child.tag + '_' + str(child.level + 1)]['f']
+				elif 'p' in self.config[child.tag + '_' + str(child.level + 1)]:
+					child.packets_number = self.config[child.tag + '_' + str(child.level + 1)]['p']
+				child.classifier_name = self.config[child.tag + '_' + str(child.level + 1)]['c']
 				print('config','tag',child.tag,'level',child.level,'f',child.features_number,'c',child.classifier_name)
 			else:
 				child.features_number = self.features_number
 				child.packets_number = self.packets_number
 				child.classifier_name = self.classifier_name
-
-			# print(self.prediction[parent.test_index])
-
-			# print(child.tag, child.level)
-			# print(len(child.train_index))
+				print('config','tag',child.tag,'level',child.level,'f',child.features_number,'c',child.classifier_name)
 
 			self.classifiers[self.classifiers.index(parent)].children[child.tag]=child
 
@@ -485,6 +518,11 @@ class HierarchicalClassifier(object):
 		for index, pred in zip(node.test_index, self.prediction[node.test_index, node.level]):
 
 			self.prediction[index, node.level] = node.tag
+			self.probability[index, node.level] = (1.0, 1.0, 1.0)
+
+		for index, pred in zip(node.test_index_all, self.prediction_all[node.test_index_all, node.level]):
+
+			self.prediction_all[index, node.level] = node.tag
 
 		node.features_index = node.parent.features_index
 
@@ -573,9 +611,11 @@ class HierarchicalClassifier(object):
 	def test(self, node, classifier):
 
 		pred = classifier.predict(self.testing_set[node.test_index][:, node.features_index])
+		proba = classifier.predict_proba(self.testing_set[node.test_index][:, node.features_index])
 
-		for p, i in zip(pred, node.test_index):
+		for p, b, i in zip(pred, proba, node.test_index):
 			self.prediction[i, node.level] = p
+			self.probability[i, node.level] = b
 
 	def test_all(self, node, classifier):
 
@@ -601,22 +641,26 @@ if __name__ == "__main__":
 	levels_number = 0
 	features_number = 0
 	packets_number = 0
-	classifier_name = 'srf'
-
-	general = False
+	classifier_name = ''
 
 	config_file = ''
 	config = ''
 
 	try:
 		opts, args = getopt.getopt(
-			sys.argv[1:], "hi:n:f:p:c:go:", "[input_file=,levels_number=,features_number=,packets_number=,classifier_name=,configuration=]")
+			sys.argv[1:], "hi:n:f:p:c:o:", "[input_file=,levels_number=,features_number=,packets_number=,classifier_name=,configuration=]")
 	except getopt.GetoptError:
-		print('MultilayerClassifier3.0.py -i <input_file> -n <levels_number> (-f <features_number>|-p <packets_number>) -c <classifier_name> (-g)')
+		print('HierarchicalClassifier.py -i <input_file> -n <levels_number> (-f <features_number>|-p <packets_number>) -c <classifier_name> -o <configuration_file>')
+		print('FlatClassifier.py -h (or --help) for a carefuler help')
 		sys.exit(2)
 	for opt, arg in opts:
 		if opt in ("-h", "--help"):
-			print('usage: MultilayerClassifier3.0.py -i <input_file> -n <levels_number> (-f <features_number>|-p <packets_number>) -c <classifier_name>')
+			print('HierarchicalClassifier.py -i <input_file> -n <levels_number> (-f <features_number>|-p <packets_number>) -c <classifier_name> -o <configuration_file>')
+			print('Options:\n\t-i: dataset file, must be in arff format\n\t-n: number of levels (number of labels\' columns)')
+			print('\t-f or -p: former refers features number, latter refers packets number\n\t-c: classifier name choose from following list:')
+			for sc in supported_classifiers:
+				print('\t\t-c '+sc+'\t--->\t'+supported_classifiers[sc].split('_')[1]+'\t\timplemented in '+supported_classifiers[sc].split('_')[0])
+			print('\t-o: configuration file in JSON format')
 			sys.exit()
 		if opt in ("-i", "--input_file"):
 			input_file = arg
@@ -628,14 +672,12 @@ if __name__ == "__main__":
 			packets_number = int(arg)
 		if opt in ("-c", "--clf"):
 			classifier_name = arg
-		if opt in ("-g", "--general"):
-			general = True
 		if opt in ("-o", "--configuration"):
 			config_file = arg
 
 	if config_file:
 		if not config_file.endswith('.json'):
-			print('config file must have .json extention')
+			print('Config file must have .json extention')
 			sys.exit()
 
 		import json
@@ -645,7 +687,7 @@ if __name__ == "__main__":
 
 	else:
 
-		if not general and (packets_number != 0 and features_number != 0 or packets_number == features_number):
+		if packets_number != 0 and features_number != 0 or packets_number == features_number:
 			print('-f and -p option should not be used together')
 			sys.exit()
 
@@ -656,48 +698,15 @@ if __name__ == "__main__":
 			sys.exit()
 
 	if levels_number == 0:
-		print('MultilayerClassifier3.0.py -i <input_file> -n <levels_number> (-f <features_number>|-p <packets_number>) -c <classifier_name>')
 		print('Number of level must be positive and non zero')
 		sys.exit()
 
 	if not input_file.endswith(".arff"):
-		print('input files must be .arff')
+		print('Input files must be .arff')
 		sys.exit()
 
-	if not general:
-
-		hierarchical_classifier = HierarchicalClassifier(input_file=input_file,levels_number=levels_number,features_number=features_number,packets_number=packets_number,classifier_name=classifier_name)
-		if config:
-			config_name = config_file.split('.')[0]
-			hierarchical_classifier.set_config(config_name, config)
-		hierarchical_classifier.kfold_validation(k=10)
-
-	else:
-
-		# jvm.start(max_heap_size=str(available_ram)+'g')
-
-		hierarchical_classifiers = []
-
-		for classifier_name in supported_classifiers:
-			if 'w' in classifier_name:
-				for features_number in range(5,74,5):
-					hierarchical_classifiers.append(HierarchicalClassifier(input_file=input_file,levels_number=levels_number,features_number=features_number,packets_number=packets_number,classifier_name=classifier_name))
-				hierarchical_classifiers.append(HierarchicalClassifier(input_file=input_file,levels_number=levels_number,features_number=74,packets_number=packets_number,classifier_name=classifier_name))
-
-		threads = []
-
-		for hierarchical_classifier in hierarchical_classifiers:
-			threads.append(Thread(target=hierarchical_classifier.kfold_validation, args=(10, )))
-
-		for thread in threads:
-			thread.start()
-
-		for thread in threads:
-			thread.join()
-
-			del thread
-
-		# for hierarchical_classifier in hierarchical_classifiers:
-		# 	hierarchical_classifier.kfold_validation(10)
-
-		# jvm.stop()
+	hierarchical_classifier = HierarchicalClassifier(input_file=input_file,levels_number=levels_number,features_number=features_number,packets_number=packets_number,classifier_name=classifier_name)
+	if config:
+		config_name = config_file.split('.')[0]
+		hierarchical_classifier.set_config(config_name, config)
+	hierarchical_classifier.kfold_validation(k=10)

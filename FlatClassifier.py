@@ -37,18 +37,13 @@ from sklearn.preprocessing import CategoricalEncoder
 from sklearn.impute import SimpleImputer
 import progressbar
 import psutil
-from threading import Thread
-from threading import Semaphore
-
-sem = Semaphore(5)
 
 class SklearnWekaWrapper(object):
 
 	def __init__(self, class_name, options=None):
 
 		if options is not None:
-			self._classifier = Classifier(classname=class_name, options=[
-									  option for option in options.split()])
+			self._classifier = Classifier(classname=class_name, options=[option for option in options.split()])
 		else:
 			self._classifier = Classifier(classname=class_name)
 
@@ -127,15 +122,15 @@ class FlatClassifier(object):
 
 	def kfold_validation(self, k=10):
 
-		sem.acquire()
-
 		available_ram = psutil.virtual_memory()[1]
 		available_ram = int(int(available_ram) * .9 * 1e-9)
 
 		if available_ram > 5:
 			jvm.start(max_heap_size='5g')
 		else:
-			jvm.start(max_heap_size=str(available_ram)+'g')
+			print('Seem your machine has less than 5 GB amount of RAM available:\n')
+			print('cannot start jvm.')
+			sys.exit()
 
 		###
 
@@ -155,11 +150,6 @@ class FlatClassifier(object):
 		if len(nominal_features_index) > 0:
 			data[:, nominal_features_index] = encoder.fit_transform(
 				data[:, nominal_features_index])
-
-		# Impute missing value by fitting over training set and transforming both sets
-		imp = SimpleImputer(missing_values='NaN', strategy='most_frequent')
-		data[:, :self.dataset_features_number] = imp.fit_transform(
-			data[:, :self.dataset_features_number])
 
 		prediction = []
 		probability = []
@@ -194,9 +184,6 @@ class FlatClassifier(object):
 			prediction.append(self.prediction)
 			probability.append(self.probability)
 			oracle.append(self.oracle)
-
-			# print(type(prediction[bar_cnt]))
-			# print(type(probability[bar_cnt]))
 
 			bar_cnt += 1
 			bar.update(bar_cnt)
@@ -352,19 +339,11 @@ class FlatClassifier(object):
 
 		jvm.stop()
 
-		sem.release()
-
 	def features_selection(self):
-		'''
-		Questa funzione parte dal presupposto che features che presentano occorrenze costanti
-		non verranno selezionate, dando un contributo nullo, e saranno sempre azzerate.
-		'''
 
 		features_index = []
 
 		if self.features_number != 0 and self.features_number != self.dataset_features_number:
-
-			# print('\n***\nFeature Selection -f'+str(self.features_number)+' -c'+self.classifier_name'\n***\n')
 
 			selector = SelectKBest(mutual_info_classif, k=self.features_number)
 			training_set_selected = selector.fit_transform(
@@ -485,17 +464,20 @@ if __name__ == "__main__":
 	packets_number = 0
 	classifier_name = 'srf'
 
-	general = False
-
 	try:
 		opts, args = getopt.getopt(
-			sys.argv[1:], "hi:n:t:f:p:c:g", "[input_file=,levels_number=,level_target=,features_number=,packets_number=,classifier=]")
+			sys.argv[1:], "hi:n:t:f:p:c:", "[input_file=,levels_number=,level_target=,features_number=,packets_number=,classifier=]")
 	except getopt.GetoptError:
-		print('FlatClassifier3.0.py -i <input_file> -n <levels_number> -t <level_target> (-f <features_number>|-p <packets_number>)')
+		print('FlatClassifier.py -i <input_file> -n <levels_number> -t <level_target> (-f <features_number>|-p <packets_number>) -c <classifier_name>')
+		print('FlatClassifier.py -h (or --help) for a carefuler help')
 		sys.exit(2)
 	for opt, arg in opts:
 		if opt in ("-h", "--help"):
-			print('FlatClassifier3.0.py -i <input_file> -n <levels_number> -t <level_target> (-f <features_number>|-p <packets_number>)')
+			print('FlatClassifier.py -i <input_file> -n <levels_number> -t <level_target> (-f <features_number>|-p <packets_number>) -c <classifier_name>\n')
+			print('Options:\n\t-i: dataset file, must be in arff format\n\t-n: number of levels (number of labels\' columns)\n\t-t: level target of classification, count of levels start from 1')
+			print('\t-f or -p: former refers features number, latter refers packets number\n\t-c: classifier name choose from following list:')
+			for sc in supported_classifiers:
+				print('\t\t-c '+sc+'\t--->\t'+supported_classifiers[sc].split('_')[1]+'\t\timplemented in '+supported_classifiers[sc].split('_')[0])
 			sys.exit()
 		if opt in ("-i", "--input_file"):
 			input_file = arg
@@ -509,21 +491,17 @@ if __name__ == "__main__":
 			packets_number = int(arg)
 		if opt in ("-c", "--clf"):
 			classifier_name = arg
-		if opt in ("-g", "--general"):
-			general = True
 
-	if not general and (packets_number != 0 and features_number != 0 or packets_number == features_number):
+	if packets_number != 0 and features_number != 0 or packets_number == features_number:
 		print('-f and -p option should not be used together')
 		sys.exit()
 
 	if levels_number == 0:
-		print('FlatClassifier3.0.py -i <input_file> -n <levels_number> -t <level_target> (-f <features_number>|-p <packets_number>)')
 		print('Number of level must be positive and non zero')
 		sys.exit()
 
-	if not general and (level_target == 0 or level_target > levels_number):
-		print('FlatClassifier3.0.py -i <input_file> -n <levels_number> -t <level_target> (-f <features_number>|-p <packets_number>)')
-		print('Level target represent the target label of classification, count of levels start from 1. Must be positive, non zero and less than or equal to levels_number')
+	if level_target == 0 or level_target > levels_number:
+		print('Level target must be positive, non zero and less than or equal to levels_number')
 		sys.exit()
 
 	if not input_file.endswith(".arff"):
@@ -536,33 +514,5 @@ if __name__ == "__main__":
 			print('-c '+sc+'\t--->\t'+supported_classifiers[sc].split('_')[1]+'\t\timplemented in '+supported_classifiers[sc].split('_')[0])
 		sys.exit()
 
-	if not general:
-
-		flat_classifier = FlatClassifier(input_file=input_file,levels_number=levels_number,level_target=level_target,features_number=features_number,packets_number=packets_number,classifier_name=classifier_name)
-		flat_classifier.kfold_validation(k=10)
-
-	else:
-
-		# jvm.start(max_heap_size=str(available_ram)+'g')
-
-		flat_classifiers = []
-
-		for level_target in range(3):
-			for features_number in range(5,74,5):
-				flat_classifiers.append(FlatClassifier(input_file=input_file,levels_number=levels_number,level_target=level_target,features_number=features_number,packets_number=packets_number,classifier_name='wrf'))
-			flat_classifiers.append(FlatClassifier(input_file=input_file,levels_number=levels_number,level_target=level_target,features_number=74,packets_number=packets_number,classifier_name='wrf'))
-
-		threads = []
-
-		for flat_classifier in flat_classifiers:
-			threads.append(Thread(target=flat_classifier.kfold_validation, args=(10, )))
-
-		for thread in threads:
-			thread.start()
-
-		for thread in threads:
-			thread.join()
-
-			del thread
-
-		# jvm.stop()
+	flat_classifier = FlatClassifier(input_file=input_file,levels_number=levels_number,level_target=level_target,features_number=features_number,packets_number=packets_number,classifier_name=classifier_name)
+	flat_classifier.kfold_validation(k=10)
